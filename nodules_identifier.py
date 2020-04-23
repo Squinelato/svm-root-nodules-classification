@@ -1,11 +1,13 @@
 """this module aims in load, processes and train SVM algoritm in root nodules dataset
 """
 import os
+import json
 from datetime import datetime as dt
 
 import cv2
 import joblib
 import numpy as np
+import pandas as pd
 from mahotas.features import haralick
 from skimage.measure import moments_hu
 
@@ -30,6 +32,12 @@ class Identifier:
         self.scaler = RobustScaler()
         self.cross_val = StratifiedKFold(n_splits=5)
         self.optimized_classifier = None
+        self.bbox_list = list()
+        self.y_predict = list()
+        self.image = None
+        self.csv_file = None
+        self.json_file = None
+
 
     @staticmethod
     def load_images_from_folder(folder):
@@ -47,6 +55,35 @@ class Identifier:
             if img is not None:
                 images.append(img)
         return images
+
+    def read_image(self, image_path):
+        """this method read an input image turn it to a RGB representation and return its shape
+
+        Arguments:
+            image_path {Str} -- the input path of the given image
+
+        Returns:
+            list -- a list with the height, width and the number of color channels of the image
+        """
+        original_image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        self.image = original_image
+
+        return original_image.shape
+
+    def read_csv_file(self, csv_path):
+        """this method read a csv file and get the position of each bounding box
+        of the image, besides its label, and save it on the class objects
+
+        Arguments:
+            csv_path {str} -- the input path of the csv file
+        """
+        self.csv_file = pd.read_csv(csv_path)
+        for minr_norm, minc_norm, maxr_norm, maxc_norm in zip(self.csv_file.minr_norm,
+                                                              self.csv_file.minc_norm,
+                                                              self.csv_file.maxr_norm,
+                                                              self.csv_file.maxc_norm):
+
+            self.bbox_list.append([minr_norm, minc_norm, maxr_norm, maxc_norm])
 
     @staticmethod
     def extract_features(image):
@@ -86,7 +123,7 @@ class Identifier:
         self.labels = np.load('features/labels.npy')
 
     def split_dataset(self):
-        """this method split the loaded features into a training and a test 
+        """this method split the loaded features into a training and a test
         dataset, in a stratified way
         """
         x_train, x_test, y_train, y_test = train_test_split(self.features,
@@ -98,10 +135,18 @@ class Identifier:
         self.y_train = y_train
         self.y_test = y_test
 
+    def reset_attributes(self):
+        """this method reset all the attributes of the Maker class
+        """
+        self.image = None
+        self.y_predict = list()
+        self.bbox_list = list()
+
     def normalize(self):
         """this method normalizes a given dataset
         """
-        self.x_train = self.scaler.fit_transform(self.x_train)
+        self.scaler.fit(self.x_train)
+        self.x_train = self.scaler.transform(self.x_train)
         self.x_test = self.scaler.transform(self.x_test)
 
     def pipeline(self):
@@ -199,4 +244,58 @@ class Identifier:
                 name = name.replace('.plk', '')
                 file.writelines(','.join(name.split('_')) + ',' + ','.join(data) + '\n')
 
-    def 
+    def csv_predict(self, image_path, csv_path):
+        """This method predict if a bbox is a root nodule or false root nodule
+        in a image given a CSV file
+
+        Arguments:
+            image_path {str} -- the path of the image
+            csv_path {str} -- the path of the CSV containing the bboxes
+        """
+        image_height, image_width = self.read_image(image_path)
+        self.read_csv_file(csv_path)
+
+        for bbox in self.bbox_list:
+
+            minr_norm, minc_norm, maxr_norm, maxc_norm = bbox
+
+            minr, maxr = int(minr_norm*image_height), int(maxr_norm*image_height)
+            minc, maxc = int(minc_norm*image_width), int(maxc_norm*image_width)
+
+            features = self.extract_features(self.image[minr:maxr, minc:maxc])
+            features = self.scaler.transform([features])
+
+            self.y_predict.append(int(self.optimized_classifier.predict(features)[0]))
+
+        self.csv_file['y_label'] = self.y_predict
+        self.csv_file.to_csv(csv_path)
+
+    def json_predict(self, image_path, json_path):
+        """This method predict if a bbox is a root nodule or false root nodule
+        in a image given a json file
+
+        Arguments:
+            image_path {str} -- the path of the image
+            json_path {str} -- the path of the json containing the bboxes
+        """
+        image_height, image_width = self.read_image(image_path)
+        with open(json_path, 'r') as readed_json:
+            self.json_file = json.load(readed_json)
+
+        for bbox in self.json_file['bboxes']:
+
+            minr_norm, minc_norm, maxr_norm, maxc_norm = (bbox['rendering']['minr'],
+                                                          bbox['rendering']['minc'],
+                                                          bbox['rendering']['maxr'],
+                                                          bbox['rendering']['maxc'])
+
+            minr, maxr = int(minr_norm*image_height), int(maxr_norm*image_height)
+            minc, maxc = int(minc_norm*image_width), int(maxc_norm*image_width)
+
+            features = self.extract_features(self.image[minr:maxr, minc:maxc])
+            features = self.scaler.transform([features])
+
+            bbox['label'] = int(self.optimized_classifier.predict(features)[0])
+
+        with open('images/test.json', 'w') as written_json:
+            json.dump(self.json_file, written_json)
