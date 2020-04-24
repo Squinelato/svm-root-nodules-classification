@@ -245,13 +245,6 @@ class Identifier:
                 file.writelines(','.join(name.split('_')) + ',' + ','.join(data) + '\n')
 
     def csv_predict(self, image_path, csv_path):
-        """This method predict if a bbox is a root nodule or false root nodule
-        in a image given a CSV file
-
-        Arguments:
-            image_path {str} -- the path of the image
-            csv_path {str} -- the path of the CSV containing the bboxes
-        """
         image_height, image_width = self.read_image(image_path)
         self.read_csv_file(csv_path)
 
@@ -266,23 +259,16 @@ class Identifier:
             features = self.scaler.transform([features])
 
             self.y_predict.append(int(self.optimized_classifier.predict(features)[0]))
-
+        
         self.csv_file['y_label'] = self.y_predict
         self.csv_file.to_csv(csv_path)
 
     def json_predict(self, image_path, json_path):
-        """This method predict if a bbox is a root nodule or false root nodule
-        in a image given a json file
-
-        Arguments:
-            image_path {str} -- the path of the image
-            json_path {str} -- the path of the json containing the bboxes
-        """
         image_height, image_width = self.read_image(image_path)
-        with open(json_path, 'r') as readed_json:
-            self.json_file = json.load(readed_json)
+        with open(json_path, 'r') as f:
+            self.json_file = json.load(f)
 
-        for bbox in self.json_file['bboxes']:
+        for i, bbox in enumerate(self.json_file['bboxes']):
 
             minr_norm, minc_norm, maxr_norm, maxc_norm = (bbox['rendering']['minr'],
                                                           bbox['rendering']['minc'],
@@ -295,7 +281,8 @@ class Identifier:
             features = self.extract_features(self.image[minr:maxr, minc:maxc])
             features = self.scaler.transform([features])
 
-            bbox['label'] = int(self.optimized_classifier.predict(features)[0])
+            if not int(self.optimized_classifier.predict(features)[0]):
+                del self.json_file['bboxes'][i]
 
-        with open('images/test.json', 'w') as written_json:
-            json.dump(self.json_file, written_json)
+        with open(json_path, 'w') as f:
+            json.dump(self.json_file, f)
