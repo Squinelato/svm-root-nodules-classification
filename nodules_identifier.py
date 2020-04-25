@@ -1,7 +1,10 @@
 """this module aims in load, processes and train SVM algoritm in root nodules dataset
 """
 import os
+import sys
+import glob
 import json
+import getopt
 from datetime import datetime as dt
 
 import cv2
@@ -244,7 +247,15 @@ class Identifier:
                 name = name.replace('.plk', '')
                 file.writelines(','.join(name.split('_')) + ',' + ','.join(data) + '\n')
 
-    def csv_predict(self, image_path, csv_path):
+    def csv_predict(self, image_path, csv_path, output_directory):
+        """this method uses the trained SVM classifier to predict if a given bbox
+        is a nodule or a false nodule, then save thos label on the given CSV file
+
+        Arguments:
+            image_path {str} -- the path of the image
+            csv_path {str} -- the path of the CSV file
+            output_directory {str} -- the path of the output directory
+        """
         image_height, image_width = self.read_image(image_path)
         self.read_csv_file(csv_path)
 
@@ -259,14 +270,22 @@ class Identifier:
             features = self.scaler.transform([features])
 
             self.y_predict.append(int(self.optimized_classifier.predict(features)[0]))
-        
-        self.csv_file['y_label'] = self.y_predict
-        self.csv_file.to_csv(csv_path)
 
-    def json_predict(self, image_path, json_path):
+        self.csv_file['y_label'] = self.y_predict
+        self.csv_file.to_csv(output_directory + csv_path.split('/')[-1], index=False)
+
+    def json_predict(self, image_path, json_path, output_directory):
+        """this method uses the trained SVM classifier to predict if a given bbox
+        is a nodule or a false nodule, then save thos label on the given JSON file
+
+        Arguments:
+            image_path {str} -- the path of the image
+            json_path {str} -- the path of the JSON file
+            output_directory {str} -- the path of the output directory
+        """
         image_height, image_width = self.read_image(image_path)
-        with open(json_path, 'r') as f:
-            self.json_file = json.load(f)
+        with open(json_path, 'r') as f_json:
+            self.json_file = json.load(f_json)
 
         for i, bbox in enumerate(self.json_file['bboxes']):
 
@@ -278,11 +297,134 @@ class Identifier:
             minr, maxr = int(minr_norm*image_height), int(maxr_norm*image_height)
             minc, maxc = int(minc_norm*image_width), int(maxc_norm*image_width)
 
+            if minc < 0:
+                minc = 0
+            elif maxc > image_width:
+                maxc = image_width
+            elif minr < 0:
+                minr = 0
+            elif maxr > image_height:
+                maxr = image_height
+
             features = self.extract_features(self.image[minr:maxr, minc:maxc])
             features = self.scaler.transform([features])
 
             if not int(self.optimized_classifier.predict(features)[0]):
                 del self.json_file['bboxes'][i]
 
-        with open(json_path, 'w') as f:
-            json.dump(self.json_file, f)
+        with open(output_directory + json_path.split('/')[-1], 'w') as f_json:
+            json.dump(self.json_file, f_json)
+
+    def predict(self, image_path, metadata_path, output_directory, file_type):
+        """this method only select the proper function due the chosen file type
+
+        Arguments:
+            image_path {str} -- the path of the image
+            metadata_path {str} -- the path of the CSV or JSON file
+            file_type {str} -- the type (CSV|JSON) of the metadata file
+            output_directory {str} -- the path of the output directory
+        """
+        if file_type == 'csv':
+            self.csv_predict(image_path, metadata_path, output_directory)
+        else:
+            self.json_predict(image_path, metadata_path, output_directory)
+
+
+if __name__ == "__main__":
+
+    try:
+        OPTS, ARGS = getopt.getopt(sys.argv[1:], 'i:m:o:t:f:h', ['input_image_directory',
+                                                               'input_metadata_directory',
+                                                               'output_directory'
+                                                               'meta_type',
+                                                               'image_type'
+                                                               'help'])
+    except getopt.GetoptError as err:
+        print(err)
+        sys.exit(1)
+
+    IDENTIFIER = Identifier()
+    IDENTIFIER.pipeline()
+    IDENTIFIER.load_optimized_classifier('classifiers/poly_2020-04-21_21:18:09.plk')
+    METADATA_PATH = list()
+    IMAGES_PATH = list()
+    META_TYPE = None
+    IMAGE_TYPE = None
+
+    for opt, arg in OPTS:
+
+        if opt in ('-h', '--help'):
+            print('nodules_Identifer.py -i --input_image_directory -t --meta_type [CSV|JSON] '
+                  '-f --image_type -m --input_metadata_directory -h --help')
+            sys.exit(2)
+
+        elif opt in ('-t', '--meta_type'):
+            if arg.lower() == 'csv':
+                META_TYPE = 'csv'
+            elif arg.lower() == 'json':
+                META_TYPE = 'json'
+            else:
+                print('Invalid metadata format')
+                sys.exit(3)
+
+        elif opt in ('-f', '--image_type'):
+            if arg.lower() == 'png':
+                IMAGE_TYPE = 'png'
+            elif arg.lower() == 'jpg':
+                IMAGE_TYPE = 'jpg'
+            else:
+                print('Invalid image format')
+                sys.exit(4)
+
+    if not META_TYPE:
+        print('missing --meta_type parameter (CSV|JSON)')
+        sys.exit(4)
+    elif not IMAGE_TYPE:
+        print('missing --image_type parameter (PNG|JPG)')
+        sys.exit(5)
+
+    for opt, arg in OPTS:
+
+        if opt in ('-i', '--input_image_directory'):
+
+            if os.path.isdir(arg):
+                print(IMAGE_TYPE)
+                for image_file in glob.glob('./{}/*.{}'.format(arg, IMAGE_TYPE)):
+                    IMAGES_PATH.append(image_file)
+            else:
+                print('the input directory {} does not exist\n'.format(arg))
+                sys.exit(6)
+
+        elif opt in ('-m', '--input_metadata_directory'):
+            if os.path.isdir(arg):
+                for meta_file in glob.glob('./{}/*.{}'.format(arg, META_TYPE)):
+                    METADATA_PATH.append(meta_file)
+            else:
+                print('the input directory {} does not exist\n'.format(arg))
+                sys.exit(7)
+
+    if IMAGES_PATH == list():
+        print('\nNo image loaded. Check the input image folder\n')
+        sys.exit(8)
+    elif METADATA_PATH == list():
+        print('\nNo CSV or JSON loaded. Check the input metadate folder\n')
+        sys.exit(9)
+
+    METADATA_PATH.sort()
+    IMAGES_PATH.sort()
+
+    for opt, arg in OPTS:
+
+        if opt in ('-o', '--output_directory'):
+            if not os.path.exists(arg):
+                os.mkdir(arg)
+
+            for imag, meta in zip(IMAGES_PATH, METADATA_PATH): 
+
+                jpg_name = imag.split('/')[-1].split('.')[-2]
+                meta_name = meta.split('/')[-1].split('.')[-2]
+
+                if jpg_name == meta_name:
+                    print(jpg_name, meta_name)
+                    IDENTIFIER.predict(imag, meta, arg, META_TYPE)
+                    IDENTIFIER.reset_attributes()
