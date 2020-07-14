@@ -2,3 +2,4 @@
 .idea/
 .pylintrc
 __pycache__
+.venv
