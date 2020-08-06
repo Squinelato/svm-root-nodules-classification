@@ -3,6 +3,12 @@
 from sklearn.svm import SVC
 from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import RobustScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import RandomizedSearchCV
+from sklearn.naive_bayes import ComplementNB
+from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import f1_score
+
 from sklearn.model_selection import (
     GridSearchCV,
     cross_validate,
@@ -15,6 +21,9 @@ from datetime import datetime as dt
 from mahotas.features import haralick
 
 from skimage.measure import moments_hu
+
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 import os
 import sys
@@ -140,9 +149,17 @@ class Identifier:
     def load_features(self, features_path):
         """this method loads the extracted features and its labels
         """
-        self.features = np.load(features_path + 'features/features.npy')
-        self.labels = np.load(features_path + 'features/labels.npy')
-        print(len(self.labels))
+        self.features = np.load(features_path + 'features.npy')
+        self.labels = np.load(features_path + 'labels.npy')
+
+        dataset_size = len(self.labels)
+        _, classes = np.unique(self.labels, return_counts=True)
+
+        with open('score/metadata.txt', 'w') as txt:
+            txt.writelines(
+                "total number of instances: {} \n".format(dataset_size))
+            txt.writelines("number of positive classes: {} \n".format(classes[1]))
+            txt.writelines("number of negative classes: {} \n".format(classes[0]))            
 
     def split_dataset(self):
         """this method split the loaded features into a training and a test
@@ -152,7 +169,8 @@ class Identifier:
             self.features,
             self.labels,
             stratify=self.labels,
-            test_size=0.2)
+            test_size=0.2,
+            random_state=42)
 
         self.x_train = x_train
         self.x_test = x_test
@@ -184,7 +202,63 @@ class Identifier:
         print('Normalizing the dataset')
         self.normalize()
 
-    def training(self, kernel, scoring='f1_weighted'):
+    def train_naive_baies(self):
+        default_params = {    
+            'fit_prior': [True, False],
+            'norm': [True, False]
+        }
+
+        nb_clf = ComplementNB(alpha= 0.924)
+
+        grid_search = GridSearchCV(
+            nb_clf,
+            param_grid=default_params,
+            cv=self.cross_val, scoring='f1_weighted',
+            verbose=3, n_jobs=4)
+
+        grid_search.fit(self.x_train, self.y_train)
+        print('Best score: {}'.format(grid_search.best_score_))
+        print('Best parameters: {}'.format(grid_search.best_params_))
+
+        now = dt.now().strftime('%Y-%m-%d_%H:%M:%S')
+        joblib.dump(
+            grid_search.best_estimator_,
+            'classifiers/{}_{}.plk'.format('naive_bayes', now))
+
+    def train_random_forest(self):
+
+        n_estimators = [int(x) for x in np.linspace(start = 200, stop = 2000, num = 10)]
+        max_features = ['auto', 'sqrt']
+        max_depth = [int(x) for x in np.linspace(10, 110, num = 11)]
+        max_depth.append(None)
+        min_samples_split = [5, 10, 25]
+        min_samples_leaf = [4, 10, 20]
+        bootstrap = [True, False]
+
+        random_param = {
+            'n_estimators': n_estimators,
+            'max_features': max_features,
+            'max_depth': max_depth,
+            'min_samples_split': min_samples_split,
+            'min_samples_leaf': min_samples_leaf,
+            'bootstrap': bootstrap}
+
+        forest_clf = RandomForestClassifier()
+        search_forest = RandomizedSearchCV(
+            forest_clf, param_distributions=random_param, cv=self.cross_val,
+            n_iter=100, verbose=5, n_jobs=-1, scoring='f1_weighted')
+
+        search_forest.fit(self.x_train, self.y_train)
+
+        print('Best score: {}'.format(search_forest.best_score_))
+        print('Best parameters: {}'.format(search_forest.best_params_))
+
+        now = dt.now().strftime('%Y-%m-%d_%H:%M:%S')
+        joblib.dump(
+            search_forest.best_estimator_,
+            'classifiers/{}_{}.plk'.format('ramdomForest', now))
+
+    def train_svm(self, kernel, scoring='f1_weighted'):
         """this method train and fine-tune a SVM classfier with the given kernel
 
         Arguments:
@@ -258,13 +332,44 @@ class Identifier:
                 scores['test_f1_weighted'].mean(),
                 scores['test_f1_weighted'].std())
 
-    def calculate_metrics(self):
+    def get_test_metrics(self, classifier):
+
+        y_pred = classifier.predict(self.x_test)
+
+        return (
+            balanced_accuracy_score(self.y_test, y_pred),
+            f1_score(self.y_test, y_pred))
+
+    def calculate_test_metrics(self, classifiers_path, csv_path):
+
+        classifiers = [
+            (clf, joblib.load(classifiers_path + clf))
+            for clf in os.listdir(classifiers_path) if '.plk' in clf]
+
+        headers = [
+            'file_name',
+            'day',
+            'hour',
+            'balanced_accuracy',
+            'f1_weighted']
+
+        with open(csv_path + 'test_results.csv', 'w') as file:
+
+            file.writelines(','.join(headers) + '\n')
+            for name, classifier in classifiers:
+                data = [str(metric) for metric in self.get_test_metrics(classifier)]
+                name = name.replace('.plk', '')
+                file.writelines(
+                    ','.join(name.split('_')) + ',' + ','.join(data) + '\n')
+
+    def calculate_metrics(self, classifiers_path, csv_path):
         """this method uses the get_metrics method in order to evaluate all
         the classifiers on a given folder and then compile these
         informations in a CSV file
         """
-        classifiers = [(clf, joblib.load('./classifiers/' + clf))
-                       for clf in os.listdir('./classifiers') if '.plk' in clf]
+        classifiers = [
+            (clf, joblib.load(classifiers_path + clf))
+            for clf in os.listdir(classifiers_path) if '.plk' in clf]
 
         headers = [
             'file_name',
@@ -275,7 +380,7 @@ class Identifier:
             'f1_weighted',
             'std']
 
-        with open('scores/results.csv', 'w') as file:
+        with open(csv_path + 'train_results.csv', 'w') as file:
 
             file.writelines(','.join(headers) + '\n')
             for name, classifier in classifiers:
@@ -297,6 +402,12 @@ class Identifier:
         image_height, image_width = self.read_image(image_path)
         self.read_csv_file(csv_path)
 
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        fig, plot_ax = plt.subplots()
+        plot_ax.imshow(image)
+
         for bbox in self.bbox_list:
 
             minr_norm, minc_norm, maxr_norm, maxc_norm = bbox
@@ -308,15 +419,35 @@ class Identifier:
                 int(minc_norm*image_width),
                 int(maxc_norm*image_width))
 
+            maxr += 12
+            maxc += 12
+            minr -= 12
+            minc -= 12
+
             features = self.extract_features(self.image[minr:maxr, minc:maxc])
             features = self.scaler.transform([features])
 
-            self.y_predict.append(
-                int(self.optimized_classifier.predict(features)[0]))
+            nodule_label = int(self.optimized_classifier.predict(features)[0])
+            self.y_predict.append(nodule_label)
+            color = 'b' if nodule_label == 1 else 'r'
+
+            rect = mpatches.Rectangle((minc, minr), maxc - minc, maxr - minr,
+                                      fill=False, edgecolor=color,
+                                      linewidth=0.4)
+            plot_ax.add_patch(rect)
 
         self.csv_file['y_label'] = self.y_predict
         self.csv_file.to_csv(
             output_directory + csv_path.split('/')[-1], index=False)
+
+        plot_ax.set_axis_off()
+        plt.tight_layout()
+        fig.savefig(
+            output_directory + csv_path.split('/')[-1].replace('csv', 'png'),
+            dpi=400, bbox_inches='tight')
+        plt.cla()
+        plt.clf()
+        plt.close(fig)
 
     def json_predict(self, image_path, json_path, output_directory):
         """this method uses the trained SVM classifier to predict if
@@ -399,9 +530,9 @@ if __name__ == "__main__":
         sys.exit(1)
 
     IDENTIFIER = Identifier()
-    IDENTIFIER.pipeline()
+    IDENTIFIER.pipeline('features/07_2020/')
     IDENTIFIER.load_optimized_classifier(
-        'classifiers/poly_2020-04-21_21:18:09.plk')
+        'classifiers/07_2020/ramdomForest_2020-07-16_21:53:39.plk')
     METADATA_PATH = list()
     IMAGES_PATH = list()
     META_TYPE = None

@@ -1,0 +1,2 @@
+file_name,day,hour,balanced_accuracy,std,f1_weighted,std
+ramdomForest,2020-07-25,15:04:17,0.6,0.12247448713915891,0.6631868131868133,0.15598052847708652
